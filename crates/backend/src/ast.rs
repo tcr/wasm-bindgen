@@ -14,6 +14,8 @@ pub struct Program {
     pub imports: Vec<Import>,
     /// rust enums
     pub enums: Vec<Enum>,
+    /// rust tagged union types
+    pub tagged_unions: Vec<TaggedUnion>,
     /// rust structs
     pub structs: Vec<Struct>,
     /// rust consts
@@ -201,6 +203,14 @@ pub struct StructField {
 pub struct Enum {
     pub name: Ident,
     pub variants: Vec<Variant>,
+    pub comments: Vec<String>,
+}
+
+#[cfg_attr(feature = "extra-traits", derive(Debug, PartialEq, Eq))]
+#[derive(Clone)]
+pub struct TaggedUnion {
+    pub name: Ident,
+    pub variants: Vec<(Ident, Vec<StructField>)>,
     pub comments: Vec<String>,
 }
 

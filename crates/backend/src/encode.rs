@@ -42,6 +42,7 @@ fn shared_program<'a>(prog: &'a ast::Program, intern: &'a Interner)
     Ok(Program {
         exports: prog.exports.iter().map(|a| shared_export(a, intern)).collect(),
         structs: prog.structs.iter().map(|a| shared_struct(a, intern)).collect(),
+        tagged_unions: vec![], //prog.tagged_unions.iter().map(|a| shared_tagged_union(a, intern)).collect(),
         enums: prog.enums.iter().map(|a| shared_enum(a, intern)).collect(),
         imports: prog.imports.iter()
             .map(|a| shared_import(a, intern))
@@ -183,6 +184,17 @@ fn shared_import_enum<'a>(_i: &'a ast::ImportEnum, _intern: &'a Interner)
     -> ImportEnum
 {
     ImportEnum {}
+}
+
+fn shared_tagged_union<'a>(s: &'a ast::TaggedUnion, intern: &'a Interner) -> TaggedUnion<'a> {
+    TaggedUnion {
+        name: intern.intern(&s.name),
+        variants: s.variants.iter().map(|(ident, s)| TaggedUnionVariant {
+            name: intern.intern(&ident),
+            fields: s.into_iter().map(|f| shared_struct_field(f, intern)).collect() 
+        }).collect(),
+        comments: s.comments.iter().map(|s| &**s).collect(),
+    }
 }
 
 fn shared_struct<'a>(s: &'a ast::Struct, intern: &'a Interner) -> Struct<'a> {

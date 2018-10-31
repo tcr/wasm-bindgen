@@ -9,6 +9,7 @@ macro_rules! shared_api {
     ($mac:ident) => ($mac! {
 struct Program<'a> {
     exports: Vec<Export<'a>>,
+    tagged_unions: Vec<TaggedUnion<'a>>,
     enums: Vec<Enum<'a>>,
     imports: Vec<Import<'a>>,
     structs: Vec<Struct<'a>>,
@@ -82,6 +83,17 @@ struct Export<'a> {
     is_constructor: bool,
     function: Function<'a>,
     comments: Vec<&'a str>,
+}
+
+struct TaggedUnion<'a> {
+    name: &'a str,
+    variants: Vec<TaggedUnionVariant<'a>>,
+    comments: Vec<&'a str>,
+}
+
+struct TaggedUnionVariant<'a> {
+    name: &'a str,
+    fields: Vec<StructField<'a>>,
 }
 
 struct Enum<'a> {

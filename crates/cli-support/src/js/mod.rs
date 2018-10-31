@@ -1805,6 +1805,9 @@ impl<'a, 'b> SubContext<'a, 'b> {
         for f in self.program.imports.iter() {
             self.generate_import(f)?;
         }
+        for e in self.program.tagged_unions.iter() {
+            self.generate_tagged_unions(e)?;
+        }
         for e in self.program.enums.iter() {
             self.generate_enum(e);
         }
@@ -2103,6 +2106,40 @@ impl<'a, 'b> SubContext<'a, 'b> {
         Ok(())
     }
 
+    fn generate_tagged_unions(&mut self, tagged_union: &decode::TaggedUnion) -> Result<(), Error> {
+        // self.cx
+        //     .typescript
+        //     .push_str(&format!("export type {} =\n", tagged_union.name));
+        // for variant in tagged_union.variants.iter() {
+        //     self.cx.typescript.push_str(&format!("  | {{ type: {:?}, ", variant.name));
+        //     for field in &variant.fields {
+        //         let field_str = {
+        //             let wasm_getter = shared::struct_field_get(&variant.name, &field.name);
+        //             let descriptor = match self.cx.describe(&wasm_getter) {
+        //                 None => continue,
+        //                 Some(d) => d,
+        //             };
+                    
+        //             let mut cx = Js2Rust::new(&field.name, self.cx);
+        //             cx.method(true, false)
+        //                 .argument(&descriptor)?
+        //                 .ret(&Descriptor::Unit)?;
+        //             format!(
+        //                 "{}{}: {}, ",
+        //                 if field.readonly { "readonly " } else { "" },
+        //                 field.name,
+        //                 &cx.js_arguments[0].1
+        //             )
+        //         };
+        //         self.cx.typescript.push_str(&field_str);
+        //     }
+        //     self.cx.typescript.push_str("}\n");
+        // }
+        // // self.cx.typescript.push_str(&variants);
+        // self.cx.typescript.push_str("  ;\n\n");
+        Ok(())
+    }
+
     fn generate_enum(&mut self, enum_: &decode::Enum) {
         let mut variants = String::new();
 
@@ -2131,11 +2168,13 @@ impl<'a, 'b> SubContext<'a, 'b> {
         let mut ts_dst = String::new();
         for field in struct_.fields.iter() {
             let wasm_getter = shared::struct_field_get(&struct_.name, &field.name);
+            println!("--------> {:?}", wasm_getter);
             let wasm_setter = shared::struct_field_set(&struct_.name, &field.name);
             let descriptor = match self.cx.describe(&wasm_getter) {
                 None => continue,
                 Some(d) => d,
             };
+            println!("--------> {:?} {:?}", struct_.name, field.name);
 
             let set = {
                 let mut cx = Js2Rust::new(&field.name, self.cx);
