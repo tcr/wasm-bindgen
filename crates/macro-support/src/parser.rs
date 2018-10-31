@@ -207,6 +207,14 @@ impl BindgenAttrs {
             _ => false,
         })
     }
+
+    /// Whether the tagged union attribute is present
+    fn tagged_union(&self) -> bool {
+        self.attrs.iter().any(|a| match *a {
+            BindgenAttr::TaggedUnion => true,
+            _ => false,
+        })
+    }
 }
 
 impl Parse for BindgenAttrs {
@@ -244,6 +252,7 @@ pub enum BindgenAttr {
     Extends(syn::Path),
     VendorPrefix(Ident),
     Variadic,
+    TaggedUnion,
 }
 
 impl Parse for BindgenAttr {
@@ -334,9 +343,45 @@ impl Parse for BindgenAttr {
             };
             return Ok(BindgenAttr::JsName(val, span));
         }
+        if attr == "tagged_union" {
+            return Ok(BindgenAttr::TaggedUnion);
+        }
 
         Err(original.error("unknown attribute"))
     }
+}
+
+fn consume_named_fields(ident: &syn::Ident, fields: &mut syn::FieldsNamed, check_visibility: bool) -> Result<Vec<ast::StructField>, Diagnostic> {
+    let mut dest = vec![];
+    for field in fields.named.iter_mut() {
+        if check_visibility {
+            match field.vis {
+                syn::Visibility::Public(..) => {}
+                _ => continue,
+            }
+        }
+        let name = match &field.ident {
+            Some(n) => n,
+            None => continue,
+        };
+        let ident_str = ident.to_string();
+        let name_str = name.to_string();
+        let getter = shared::struct_field_get(&ident_str, &name_str);
+        let setter = shared::struct_field_set(&ident_str, &name_str);
+        let opts = BindgenAttrs::find(&mut field.attrs)?;
+        assert_not_variadic(&opts, &field)?;
+        let comments = extract_doc_comments(&field.attrs);
+        dest.push(ast::StructField {
+            name: name.clone(),
+            struct_name: ident.clone(),
+            readonly: opts.readonly(),
+            ty: field.ty.clone(),
+            getter: Ident::new(&getter, Span::call_site()),
+            setter: Ident::new(&setter, Span::call_site()),
+            comments,
+        });
+    }
+    Ok(dest)
 }
 
 struct AnyIdent(Ident);
@@ -374,37 +419,15 @@ impl<'a> ConvertToAst<BindgenAttrs> for &'a mut syn::ItemStruct {
                  type parameters currently"
             );
         }
-        let mut fields = Vec::new();
+
         let js_name = opts.js_name()
             .map(|s| s.0.to_string())
             .unwrap_or(self.ident.to_string());
-        if let syn::Fields::Named(names) = &mut self.fields {
-            for field in names.named.iter_mut() {
-                match field.vis {
-                    syn::Visibility::Public(..) => {}
-                    _ => continue,
-                }
-                let name = match &field.ident {
-                    Some(n) => n,
-                    None => continue,
-                };
-                let name_str = name.to_string();
-                let getter = shared::struct_field_get(&js_name, &name_str);
-                let setter = shared::struct_field_set(&js_name, &name_str);
-                let opts = BindgenAttrs::find(&mut field.attrs)?;
-                assert_not_variadic(&opts, &field)?;
-                let comments = extract_doc_comments(&field.attrs);
-                fields.push(ast::StructField {
-                    name: name.clone(),
-                    struct_name: self.ident.clone(),
-                    readonly: opts.readonly(),
-                    ty: field.ty.clone(),
-                    getter: Ident::new(&getter, Span::call_site()),
-                    setter: Ident::new(&setter, Span::call_site()),
-                    comments,
-                });
-            }
-        }
+        let fields = if let syn::Fields::Named(names) = &mut self.fields {
+            consume_named_fields(&self.ident, names, true)?
+        } else {
+            Vec::new()
+        };
         let comments: Vec<String> = extract_doc_comments(&self.attrs);
         Ok(ast::Struct {
             rust_name: self.ident.clone(),
@@ -806,9 +829,13 @@ impl<'a> MacroParse<(Option<BindgenAttrs>, &'a mut TokenStream)> for syn::Item {
                 };
                 f.macro_parse(program, opts)?;
             }
-            syn::Item::Enum(e) => {
+            syn::Item::Enum(mut e) => {
+                let opts = match opts {
+                    Some(opts) => opts,
+                    None => BindgenAttrs::find(&mut e.attrs)?,
+                };
                 e.to_tokens(tokens);
-                e.macro_parse(program, ())?;
+                e.macro_parse(program, opts)?;
             }
             _ => bail_span!(
                 self,
@@ -936,58 +963,98 @@ impl<'a, 'b> MacroParse<&'a BindgenAttrs> for (&'a Ident, &'b mut syn::ImplItem)
     }
 }
 
-impl MacroParse<()> for syn::ItemEnum {
-    fn macro_parse(self, program: &mut ast::Program, (): ()) -> Result<(), Diagnostic> {
+impl MacroParse<BindgenAttrs> for syn::ItemEnum {
+    fn macro_parse(self, program: &mut ast::Program, opts: BindgenAttrs) -> Result<(), Diagnostic> {
         match self.vis {
             syn::Visibility::Public(_) => {}
             _ => bail_span!(self, "only public enums are allowed with #[wasm_bindgen]"),
         }
 
-        let variants = self
+        let is_tagged_union = opts.tagged_union();
+
+        let (enum_variants, tagged_union_variants): (Vec<_>, Vec<_>) = self
             .variants
             .iter()
             .enumerate()
-            .map(|(i, v)| {
-                match v.fields {
-                    syn::Fields::Unit => (),
-                    _ => bail_span!(v.fields, "only C-Style enums allowed with #[wasm_bindgen]"),
-                }
-                let value = match v.discriminant {
-                    Some((
-                        _,
-                        syn::Expr::Lit(syn::ExprLit {
-                            attrs: _,
-                            lit: syn::Lit::Int(ref int_lit),
-                        }),
-                    )) => {
-                        if int_lit.value() > <u32>::max_value() as u64 {
-                            bail_span!(
-                                int_lit,
-                                "enums with #[wasm_bindgen] can only support \
-                                 numbers that can be represented as u32"
-                            );
+            .map(|(i, v)| -> Result<(Option<ast::Variant>, Option<(Ident, Vec<ast::StructField>)>), Diagnostic> {
+                Ok(match v.fields {
+                    syn::Fields::Unit => {
+                        if is_tagged_union {
+                            bail_span!(v.fields, "C-Style enums are not allowed with #[wasm_bindgen(tagged_union)]");
                         }
-                        int_lit.value() as u32
-                    }
-                    None => i as u32,
-                    Some((_, ref expr)) => bail_span!(
-                        expr,
-                        "enums with #[wasm_bidngen] may only have \
-                         number literal values",
-                    ),
-                };
 
-                Ok(ast::Variant {
-                    name: v.ident.clone(),
-                    value,
+                        let value = match v.discriminant {
+                            Some((
+                                _,
+                                syn::Expr::Lit(syn::ExprLit {
+                                    attrs: _,
+                                    lit: syn::Lit::Int(ref int_lit),
+                                }),
+                            )) => {
+                                if int_lit.value() > <u32>::max_value() as u64 {
+                                    bail_span!(
+                                        int_lit,
+                                        "enums with #[wasm_bindgen] can only support \
+                                        numbers that can be represented as u32"
+                                    );
+                                }
+                                int_lit.value() as u32
+                            }
+                            None => i as u32,
+                            Some((_, ref expr)) => bail_span!(
+                                expr,
+                                "enums with #[wasm_bindgen] may only have \
+                                number literal values",
+                            ),
+                        };
+                        (Some(ast::Variant {
+                            name: v.ident.clone(),
+                            value,
+                        }), None)
+                    },
+                    syn::Fields::Named(ref fields) => {
+                        if !is_tagged_union {
+                            bail_span!(v.fields, "only C-Style enums allowed with #[wasm_bindgen]");
+                        }
+
+                        let mut fields = fields.clone();
+                        let result = consume_named_fields(&v.ident, &mut fields, false)?;
+                        (None, Some((v.ident.clone(), result)))
+                    },
+                    syn::Fields::Unnamed(_) => {
+                        bail_span!(v.fields, "tuple arguments not allowed with #[wasm_bindgen]");
+                    },
                 })
-            }).collect::<Result<_, Diagnostic>>()?;
-        let comments = extract_doc_comments(&self.attrs);
-        program.enums.push(ast::Enum {
-            name: self.ident,
-            variants,
-            comments,
-        });
+            })
+                .collect::<Result<Vec<_>, Diagnostic>>()?
+                .into_iter()
+                .unzip();
+        
+        // Post-processing
+        let enum_variants = enum_variants.into_iter().filter_map(|x| x).collect::<Vec<ast::Variant>>();
+        let tagged_union_variants = tagged_union_variants.into_iter().filter_map(|x| x).collect::<Vec<_>>();
+        if enum_variants.is_empty() && tagged_union_variants.is_empty() {
+            // We can render "all empty".
+            return Ok(())
+        } else if enum_variants.is_empty() == tagged_union_variants.is_empty() {
+            panic!("An enum marked #[wasm_bidgen] must exclusively have all tuple variants or all struct variants.");
+        }
+
+        if !enum_variants.is_empty() {
+            let comments = extract_doc_comments(&self.attrs);
+            program.enums.push(ast::Enum {
+                name: self.ident,
+                variants: enum_variants,
+                comments,
+            });
+        } else {
+            let comments = extract_doc_comments(&self.attrs);
+            program.tagged_unions.push(ast::TaggedUnion {
+                name: self.ident,
+                variants: tagged_union_variants,
+                comments,
+            });
+        }
         Ok(())
     }
 }

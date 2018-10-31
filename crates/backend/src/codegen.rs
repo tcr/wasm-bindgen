@@ -63,6 +63,9 @@ impl TryToTokens for ast::Program {
                 errors.push(e);
             }
         }
+        for e in self.tagged_unions.iter() {
+            e.to_tokens(tokens);
+        }
         for e in self.enums.iter() {
             e.to_tokens(tokens);
         }
@@ -982,6 +985,31 @@ impl<'a> ToTokens for DescribeImport<'a> {
                 #inform_ret
             },
         ).to_tokens(tokens);
+    }
+}
+
+
+impl ToTokens for ast::TaggedUnion {
+    fn to_tokens(&self, tokens: &mut TokenStream) {
+        for (name, fields) in self.variants.iter() {
+            for field in fields.iter() {
+                let name = &field.name;
+                let struct_name = &field.struct_name;
+                let ty = &field.ty;
+                let getter = &field.getter;
+                let setter = &field.setter;
+
+                println!("@@@@@@ {:?}", getter);
+                Descriptor(
+                    &getter,
+                    quote! {
+                        <#ty as WasmDescribe>::describe();
+                    },
+                ).to_tokens(tokens);
+
+                // println!("DESCRIBE {:?}", tokens.to_s);
+            }
+        }
     }
 }
 
